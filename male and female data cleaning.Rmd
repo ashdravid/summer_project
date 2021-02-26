@@ -1,0 +1,96 @@
+---
+title: "Summer Project"
+author: 'SID: 490300286'
+output: 
+  bookdown::html_document2: 
+    theme: cosmo
+    toc: true
+    toc_float: true
+    number_sections: false
+    fig_caption: yes
+    code_folding: hide
+---
+
+
+This is just the file for data cleaning to get male and female data
+
+```{r setup, set.seed(1), inclued = FALSE}
+knitr::opts_chunk$set(cache = T)
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+library(tidyverse)
+library(rpart)
+library(mltest)
+library(randomForest)
+library(readxl)
+library(caret)
+library(knitr)
+library(fairness)
+library(janitor)
+library(caretEnsemble)
+library(MLeval)
+library(ggpubr)
+library(fairmodels)
+library(ranger)
+library(DALEX)
+load("b1-15_loessSampleAllShort_Hc_batch_v1.RData")
+```
+
+# Week 1
+
+```{r}
+# bioheart disease outcomes
+bioheart <- read_excel("Master BioHEART Data Collation File.xlsx", range = "BH2:BH1602", col_names = TRUE)
+
+#bioheart patient IDs
+bioheart_id <- read_excel("Master BioHEART Data Collation File.xlsx", range = "A2:E1602", col_names = TRUE)
+bioheart <- cbind(bioheart_id, bioheart)
+bioheart$`Pat ID` = bioheart$`Pat ID` %>% as.character()
+
+#turn metabolomics mat into df
+mat %>% t() %>% rownames() -> x
+cbind(x, t(mat)) %>% as_tibble() -> met
+names(met)[1] = "Pat ID"
+
+
+#merge bioheart and metabolomics
+
+x = inner_join(bioheart, met, by = "Pat ID")
+```
+
+
+```{r show = TRUE}
+
+y_gensini = numeric()
+for (i in 1:1002) {
+  if (x$Gensini[i] != 0) {
+    y_gensini[i] = 1
+      
+  } else {
+    y_gensini[i] = 0
+  }
+  
+}
+
+
+```
+
+```{r}
+x = cbind(x, y_gensini)
+bioheart <- x %>% select(-(1:3))
+bioheart <- bioheart %>% select(-3)
+bioheart$Gender = factor(bioheart$Gender)
+bioheart$Ethnicity = factor(bioheart$Ethnicity)
+bioheart = bioheart %>% mutate_if(is.character,as.numeric)
+
+males = bioheart %>% filter(Gender == "M")
+females = bioheart %>% filter(Gender == "F")
+
+males = males %>% select(-1)
+females = females %>% select(-1)
+
+
+saveRDS(males, file = "male_metabolomics.RData")
+saveRDS(females, file = "female_metabolomics.RData")
+```

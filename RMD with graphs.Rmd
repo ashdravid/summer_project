@@ -1,0 +1,474 @@
+---
+title: "Summer Project"
+author: '490300286'
+date: "08/02/2021"
+output: 
+  bookdown::html_document2: 
+    theme: cosmo
+    toc: true
+    toc_float: true
+    number_sections: false
+    fig_caption: yes
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(rpart)
+library(aif360)
+library(mltest)
+library(randomForest)
+library(readxl)
+library(caret)
+library(knitr)
+library(fairness)
+library(janitor)
+library(caretEnsemble)
+library(MLeval)
+library(ggpubr)
+library(fairmodels)
+library(ranger)
+library(DALEX)
+
+bioheart_ethnicity <- readRDS("C:/Users/ashdr/Desktop/uni/Summer Project/bioheart_ethnicity.rds")
+```
+
+
+# Week 1 
+
+Firstly, as a baseline I built a random forest and GLM based on metabolomics data to predict binary gensini.
+
+```{r, include=FALSE}
+set.seed(1)
+
+a = createDataPartition(bioheart_ethnicity$y_gensini, p = 0.75, list = F)
+
+train = bioheart_ethnicity[a,]
+test = bioheart_ethnicity[-a,]
+```
+
+```{r}
+modelctrl = trainControl(method = "cv",
+        number = 5, savePredictions = T)
+
+full.rf = caret::train(y_gensini~., data = bioheart_ethnicity[,-1], method = "ranger", trControl = modelctrl)
+
+full.glm = caret::train(y_gensini ~ x2_arachidonyl_glycerol + x2_deoxyadenosine + 
+    x3hk + x5_aminolevulinic_acid + acetylcarnitine + alanine + 
+    anandamide + arachidonic_acid + arginine + aspartate + betaine + 
+    butyrylcarnitine + c_amp + choline + colchicine + creatine + 
+    cysteamine + dmgv + glutamate + i_keto_i²methylvaleric_acid_1 + 
+    i_keto_i²methylvaleric_acid_2 + isoleucine_leucine + l_homoserine + 
+    phenylalanine + phosphocholine + proline + serine + serotonin + 
+    spermine + thiamine + thymidine + tmno, data = bioheart_ethnicity, method = "glm", family = "binomial")
+```
+
+Then using `fairmodels` package plotted accuracy parity of GLM to look at unfairness (`acc_parity`) based on Europeans.
+
+```{r}
+glm.preds = predict(full.glm, bioheart_ethnicity)
+
+results = cbind(bioheart_ethnicity, glm.preds)
+
+p1 = fairness::acc_parity(
+  results,
+  "y_gensini",
+  "ethnicity",
+  preds = "glm.preds",
+  base = "European",
+)
+
+p1$Metric_plot + geom_hline(yintercept = 1, color = "red")
+
+```
+
+
+
+# Week 2
+
+Calculating balanced accuracy for each ethnicity and checking for balanced accuracy parity. Can see that there is some parity between asian and european, but not much for other ethnicites. Used balance accuracy just in case of class imbalances.
+
+```{r glm.balacc}
+glm.balacc = vector()
+glm.balacc[1] = confusionMatrix(results$glm.preds[results$ethnicity == "African"], results$y_gensini[results$ethnicity == "African"])$byClass[11]
+glm.balacc[2] = confusionMatrix(results$glm.preds[results$ethnicity == "Asian"], results$y_gensini[results$ethnicity == "Asian"])$byClass[11]
+glm.balacc[3] = confusionMatrix(results$glm.preds[results$ethnicity == "European"], results$y_gensini[results$ethnicity == "European"])$byClass[11]
+glm.balacc[4] = confusionMatrix(results$glm.preds[results$ethnicity == "Hispanic"], results$y_gensini[results$ethnicity == "Hispanic"])$byClass[11]
+glm.balacc[5] = confusionMatrix(results$glm.preds[results$ethnicity == "Indian"], results$y_gensini[results$ethnicity == "Indian"])$byClass[11]
+glm.balacc[6] = confusionMatrix(results$glm.preds[results$ethnicity == "Indigenous Australian"], results$y_gensini[results$ethnicity == "Indigenous Australian"])$byClass[11]
+glm.balacc[7] = confusionMatrix(results$glm.preds[results$ethnicity == "Middle Eastern"], results$y_gensini[results$ethnicity == "Middle Eastern"])$byClass[11]
+glm.balacc[8] = confusionMatrix(results$glm.preds[results$ethnicity == "Other"], results$y_gensini[results$ethnicity == "Other"])$byClass[11]
+glm.balacc[9] = confusionMatrix(results$glm.preds[results$ethnicity == "Polynesian"], results$y_gensini[results$ethnicity == "Polynesian"])$byClass[11]
+
+
+glm.balacc = data.frame(
+  Ethnicity = levels(results$ethnicity),
+  glm.balacc,
+  balacc.parity = glm.balacc/glm.balacc[3]
+)
+
+
+ggplot(na.exclude(glm.balacc), aes(x=factor(Ethnicity), y=balacc.parity, group=1))+ geom_bar(stat = "identity") + geom_line() + xlab("Ethnicity") + geom_hline(yintercept = 1, color = "red") 
+
+```
+
+# Week 3 
+
+
+## Processing algorithms to improve fariness
+
+In an attempt to improve fairness, processing algorithms were used using the package `fairmodels`.
+
+Used reweighing for each observation in each subclass using `reweight()` function from fairmodels (preprocessing)
+
+Used reject option based classification using `roc_pivot()` function in fairmodels, with theta = 0.1. (postprocessing)
+
+
+```{r, message=FALSE, warning = FALSE, results = FALSE}
+# ------------ step 1 - create model(s)  -----------------
+bioheart_ethnicity <- readRDS("C:/Users/ashdr/Desktop/uni/Summer Project/bioheart_ethnicity.rds")
+bioheart_ethnicity$y_gensini = bioheart_ethnicity$y_gensini %>% as.numeric()-1
+bioheart_ethnicity = na.exclude(bioheart_ethnicity) %>% clean_names()
+a = createDataPartition(bioheart_ethnicity$y_gensini, p = 0.75, list = F)
+
+train = bioheart_ethnicity[a,]
+test = bioheart_ethnicity[-a,]
+
+train = na.exclude(train)
+test = na.exclude(test)
+
+glm_model <- glm(factor(y_gensini)~x2_arachidonyl_glycerol + x2_deoxyadenosine +
+    x3hk + x5_aminolevulinic_acid + acetylcarnitine + alanine +
+    anandamide + arachidonic_acid + arginine + aspartate + betaine +
+    butyrylcarnitine + c_amp + choline + colchicine + creatine +
+    cysteamine + dmgv + glutamate + i_keto_i²methylvaleric_acid_1 +
+    i_keto_i²methylvaleric_acid_2 + isoleucine_leucine + l_homoserine +
+    phenylalanine + phosphocholine + proline + serine + serotonin +
+    spermine + thiamine + thymidine + tmno,
+                data = train,
+                family=binomial(link="logit"))
+
+tree_model <- rpart(factor(y_gensini) ~.,
+                    data = train[,-1], cp = 0.02325581)
+
+# ------------  step 2 - create explainer(s)  ------------
+
+# numeric y for explain function
+y_numeric <- as.numeric(test$y_gensini)
+
+
+explainer_glm <- explain(glm_model, data = test[,-55], y = y_numeric)
+explainer_tree <- explain(tree_model, data = test[,-55], y = y_numeric)
+
+# ------------  step 3 - fairness check  -----------------
+
+fobject <- fairness_check(explainer_glm, explainer_tree,
+                          protected = test$ethnicity,
+                          privileged = "European")
+
+# ------------- weighted glm and rf
+weights <- reweight(protected = test$ethnicity, y = y_numeric)
+
+glm_model_w     <- glm(factor(y_gensini) ~x2_arachidonyl_glycerol + x2_deoxyadenosine +
+    x3hk + x5_aminolevulinic_acid + acetylcarnitine + alanine +
+    anandamide + arachidonic_acid + arginine + aspartate + betaine +
+    butyrylcarnitine + c_amp + choline + colchicine + creatine +
+    cysteamine + dmgv + glutamate + i_keto_i²methylvaleric_acid_1 +
+    i_keto_i²methylvaleric_acid_2 + isoleucine_leucine + l_homoserine +
+    phenylalanine + phosphocholine + proline + serine + serotonin +
+    spermine + thiamine + thymidine + tmno,
+                     data = test,
+                     weights = weights,
+                     family=binomial(link="logit"))
+
+
+glm_explainer_w <- explain(glm_model_w,
+                           data = test[,-55],
+                           y = y_numeric,
+                           label = "glm weighted",
+                           verbose = F)
+
+tree_w <- rpart(factor(y_gensini)~.,
+                data = test,
+                weights = weights)
+
+tree_explainer_w <- explain(tree_w,
+                           data = test[,-55],
+                           y = y_numeric,
+                           label = "tree weighted",
+                           verbose = F)
+
+fobject <- fairness_check(fobject, glm_explainer_w, verbose = FALSE)
+
+fobject <- fairness_check(fobject, tree_explainer_w, verbose = FALSE)
+
+
+glm_explainer_r <- roc_pivot(explainer_glm,
+                             protected = test$ethnicity,
+                             privileged = "European")
+
+fobject <- fairness_check(fobject, glm_explainer_r,
+                          label = "glm_roc",
+                          verbose = FALSE)
+
+tree_explainer_r <- roc_pivot(explainer_tree,
+                             protected = test$ethnicity,
+                             privileged = "European")
+
+fobject <- fairness_check(fobject, tree_explainer_r,
+                          label = "tree_roc",
+                          verbose = FALSE)
+
+
+paf <- performance_and_fairness(fobject, fairness_metric = "ACC",
+                                 performance_metric = "accuracy")
+
+```
+
+Accuracy parity loss was then calculated for each model using the formula
+
+`acc_loss_parity = sum(abs(log(accuracy_party_for_each_subgroup)))` as in the fairmodels package documentation.
+
+
+```{r}
+fobject$fairness_check_data = fobject$fairness_check_data %>% na.exclude()
+fobject$fairness_check_data$metric = recode(fobject$fairness_check_data$metric, `Accuracy equality ratio    (TP + TN)/(TP + FP + TN + FN)` = "AER", `Predictive parity ratio     TP/(TP + FP)` = "PPR", `Equal opportunity ratio     TP/(TP + FN)` = "EOR", `Predictive equality ratio   FP/(FP + TN)` = "PER", `Statistical parity ratio   (TP + FP)/(TP + FP + TN + FN)` = "SPR")
+
+fairness_metric = vector()
+fairness_metric[1] = sum(abs(log(fobject$fairness_check_data$score[fobject$fairness_check_data$metric == "AER" & fobject$fairness_check_data$model == "tree_roc"])))
+fairness_metric[2] = sum(abs(log(fobject$fairness_check_data$score[fobject$fairness_check_data$metric == "AER" & fobject$fairness_check_data$model == "glm_roc"])))
+fairness_metric[3] = sum(abs(log(fobject$fairness_check_data$score[fobject$fairness_check_data$metric == "AER" & fobject$fairness_check_data$model == "tree weighted"])))
+fairness_metric[4] = sum(abs(log(fobject$fairness_check_data$score[fobject$fairness_check_data$metric == "AER" & fobject$fairness_check_data$model == "glm weighted"])))
+fairness_metric[5] = sum(abs(log(fobject$fairness_check_data$score[fobject$fairness_check_data$metric == "AER" & fobject$fairness_check_data$model == "lm"])))
+fairness_metric[6] = sum(abs(log(fobject$fairness_check_data$score[fobject$fairness_check_data$metric == "AER" & fobject$fairness_check_data$model == "rpart"])))
+
+paf$paf_data$fairness_metric = fairness_metric
+
+plot(paf)
+
+```
+
+
+# Week 4
+
+## comparing male and female fairness scores
+
+Then broke down bioheart data into males and females and applied same processing techniques to see if performance and fairness is similar to that of combined dataset.
+
+```{r}
+readRDS("male_metabolomics.RData") -> males
+readRDS("female_metabolomics.RData") -> females
+```
+
+Firstly attempt processing algorithms on males
+
+```{r, message=FALSE, warning = FALSE, results = FALSE}
+
+males = na.exclude(males) %>% clean_names()
+b = createDataPartition(males$y_gensini, p = 0.75, list = F)
+
+train_m = males[b,]
+test_m = males[-b,]
+
+
+glm_model_m <- glm(factor(y_gensini) ~ x3_ipa + x3hk + x5_aminolevulinic_acid + arachidonic_acid + asparagine + aspartate + betaine + butyrylcarnitine + c_amp + choline + colchicine + cysteamine + cysteine + cytosine + glutamate + i_keto_i²methylvaleric_acid_2 + kynurenic_acid + methionine + serotonin + taurine + tmno, data = train_m[,-1],
+                family=binomial(link="logit"))
+
+tree_model_m <- rpart(factor(y_gensini) ~., data = train_m[,-1])
+
+
+# ------------  step 2 - create explainer(s)  ------------
+
+explainer_glm_m <- explain(glm_model_m, data = test_m[,-55], y = test_m$y_gensini)
+explainer_tree_m <- explain(tree_model_m, data = test_m[,-55], y = test_m$y_gensini)
+
+
+# ------------  step 3 - fairness check  -----------------
+
+fobject_m <- fairness_check(explainer_glm_m, explainer_tree_m,
+                          protected = test_m$ethnicity,
+                          privileged = "European")
+
+
+# ------------- weighted glm and rf
+weights_m <- reweight(protected = train_m$ethnicity, y = train_m$y_gensini)
+
+glm_model_w_m     <- glm(factor(y_gensini) ~ x3_ipa + x3hk + x5_aminolevulinic_acid + arachidonic_acid + asparagine + aspartate + betaine + butyrylcarnitine + c_amp + choline + colchicine + cysteamine + cysteine + cytosine + glutamate + i_keto_i²methylvaleric_acid_2 + kynurenic_acid + methionine + serotonin + taurine + tmno, data = train_m,
+                family=binomial(link="logit"),
+                weights = weights_m)
+
+
+glm_explainer_w_m <- explain(glm_model_w_m,
+                           data = test_m[,-55],
+                           y = test_m$y_gensini,
+                           label = "glm weighted",
+                           verbose = F)
+
+tree_w_m <- rpart(factor(y_gensini)~.,
+                data = train_m[,-1],
+                weights = weights_m)
+
+tree_explainer_w_m <- explain(tree_w_m,
+                           data = test_m[,-55],
+                           y = test_m$y_gensini,
+                           label = "tree weighted",
+                           verbose = F)
+
+fobject_m <- fairness_check(fobject_m, glm_explainer_w_m, verbose = FALSE)
+
+fobject_m <- fairness_check(fobject_m, tree_explainer_w_m, verbose = FALSE)
+
+glm_explainer_r_m <- roc_pivot(explainer_glm_m,
+                             protected = test_m$ethnicity,
+                             privileged = "European")
+
+fobject_m <- fairness_check(fobject_m, glm_explainer_r_m, 
+                          label = "glm_roc",
+                          verbose = FALSE) 
+
+tree_explainer_r_m <- roc_pivot(explainer_tree_m,
+                             protected = test_m$ethnicity,
+                             privileged = "European")
+
+fobject_m <- fairness_check(fobject_m, tree_explainer_r_m, 
+                          label = "tree_roc",
+                          verbose = FALSE) 
+
+
+paf_m <- performance_and_fairness(fobject_m, fairness_metric = "ACC",
+                                 performance_metric = "accuracy")
+
+```
+
+
+Accuracy parity loss was then calculated for each model using the formula
+
+`acc_loss_parity = sum(abs(log(accuracy_party_for_each_subgroup)))` as in the fairmodels package documentation.
+
+```{r}
+fobject_m$fairness_check_data = fobject_m$fairness_check_data %>% na.exclude()
+fobject_m$fairness_check_data$metric = recode(fobject_m$fairness_check_data$metric, `Accuracy equality ratio    (TP + TN)/(TP + FP + TN + FN)` = "AER", `Predictive parity ratio     TP/(TP + FP)` = "PPR", `Equal opportunity ratio     TP/(TP + FN)` = "EOR", `Predictive equality ratio   FP/(FP + TN)` = "PER", `Statistical parity ratio   (TP + FP)/(TP + FP + TN + FN)` = "SPR")
+
+fairness_metric_m = vector()
+fairness_metric_m[1] = sum(abs(log(fobject_m$fairness_check_data$score[fobject_m$fairness_check_data$metric == "AER" & fobject_m$fairness_check_data$model == "tree_roc"])))
+fairness_metric_m[2] = sum(abs(log(fobject_m$fairness_check_data$score[fobject_m$fairness_check_data$metric == "AER" & fobject_m$fairness_check_data$model == "glm_roc"])))
+fairness_metric_m[3] = sum(abs(log(fobject_m$fairness_check_data$score[fobject_m$fairness_check_data$metric == "AER" & fobject_m$fairness_check_data$model == "tree weighted"])))
+fairness_metric_m[4] = sum(abs(log(fobject_m$fairness_check_data$score[fobject_m$fairness_check_data$metric == "AER" & fobject_m$fairness_check_data$model == "glm weighted"])))
+fairness_metric_m[5] = sum(abs(log(fobject_m$fairness_check_data$score[fobject_m$fairness_check_data$metric == "AER" & fobject_m$fairness_check_data$model == "lm"])))
+fairness_metric_m[6] = sum(abs(log(fobject_m$fairness_check_data$score[fobject_m$fairness_check_data$metric == "AER" & fobject_m$fairness_check_data$model == "rpart"])))
+
+paf_m$paf_data$fairness_metric = fairness_metric_m
+
+plot(paf_m)
+
+```
+
+
+Above plot is for males.
+
+
+
+```{r, message=FALSE, warning = FALSE, results = FALSE}
+
+females = na.exclude(females) %>% clean_names()
+c = createDataPartition(females$y_gensini, p = 0.75, list = F)
+
+train_f = females[c,]
+test_f = females[-c,]
+
+
+glm_model_f <- glm(factor(y_gensini) ~ x2_arachidonyl_glycerol + x2_deoxyadenosine + x3_ipa + x5_aminolevulinic_acid + acetylcarnitine + adenosine + alanine + anandamide + arginine + asparagine + aspartate + betaine + butyrylcarnitine + c_amp + choline + colchicine + creatine + cysteamine + cysteine + cytosine + dmgv + glutamine + histidine + i_keto_i²methylvaleric_acid_1 + i_keto_i²methylvaleric_acid_2 + isoleucine_leucine + l_homoserine + methionine + phenylalanine + phosphocholine + proline + serine + serotonin + thiamine + threonine + thymidine, family = binomial(link = "logit"), data = train_f[,-1])
+
+tree_model_f <- rpart(factor(y_gensini) ~., data = train_f[,-1])
+
+
+# ------------  step 2 - create explainer(s)  ------------
+
+explainer_glm_f <- explain(glm_model_f, data = test_f[,-55], y = test_f$y_gensini)
+explainer_tree_f <- explain(tree_model_f, data = test_f[,-55], y = test_f$y_gensini)
+
+
+# ------------  step 3 - fairness check  -----------------
+
+fobject_f <- fairness_check(explainer_glm_f, explainer_tree_f,
+                          protected = test_f$ethnicity,
+                          privileged = "European")
+
+
+# ------------- weighted glm and rf
+weights_f <- reweight(protected = train_f$ethnicity, y = train_f$y_gensini)
+
+glm_model_w_f     <- glm(factor(y_gensini) ~ x3_ipa + x3hk + x5_aminolevulinic_acid + arachidonic_acid + asparagine + aspartate + betaine + butyrylcarnitine + c_amp + choline + colchicine + cysteamine + cysteine + cytosine + glutamate + i_keto_i²methylvaleric_acid_2 + kynurenic_acid + methionine + serotonin + taurine + tmno, data = train_f,
+                family=binomial(link="logit"),
+                weights = weights_f)
+
+
+glm_explainer_w_f <- explain(glm_model_w_f,
+                           data = test_f[,-55],
+                           y = test_f$y_gensini,
+                           label = "glm weighted",
+                           verbose = F)
+
+tree_w_f <- rpart(factor(y_gensini)~.,
+                data = train_f[,-1],
+                weights = weights_f)
+
+tree_explainer_w_f <- explain(tree_w_f,
+                           data = test_f[,-55],
+                           y = test_f$y_gensini,
+                           label = "tree weighted",
+                           verbose = F)
+
+fobject_f <- fairness_check(fobject_f, glm_explainer_w_f, verbose = FALSE)
+
+fobject_f <- fairness_check(fobject_f, tree_explainer_w_f, verbose = FALSE)
+
+glm_explainer_r_f <- roc_pivot(explainer_glm_f,
+                             protected = test_f$ethnicity,
+                             privileged = "European")
+
+fobject_f <- fairness_check(fobject_f, glm_explainer_r_f, 
+                          label = "glm_roc",
+                          verbose = FALSE) 
+
+tree_explainer_r_f <- roc_pivot(explainer_tree_f,
+                             protected = test_f$ethnicity,
+                             privileged = "European")
+
+fobject_f <- fairness_check(fobject_f, tree_explainer_r_f, 
+                          label = "tree_roc",
+                          verbose = FALSE) 
+
+
+paf_f <- performance_and_fairness(fobject_f, fairness_metric = "ACC",
+                                 performance_metric = "accuracy")
+
+```
+
+Accuracy parity loss was then calculated for each model using the formula
+
+`acc_loss_parity = sum(abs(log(accuracy_party_for_each_subgroup)))` as in the fairmodels package documentation.
+
+
+```{r}
+fobject_f$fairness_check_data = fobject_f$fairness_check_data %>% na.exclude()
+fobject_f$fairness_check_data$metric = recode(fobject_f$fairness_check_data$metric, `Accuracy equality ratio    (TP + TN)/(TP + FP + TN + FN)` = "AER", `Predictive parity ratio     TP/(TP + FP)` = "PPR", `Equal opportunity ratio     TP/(TP + FN)` = "EOR", `Predictive equality ratio   FP/(FP + TN)` = "PER", `Statistical parity ratio   (TP + FP)/(TP + FP + TN + FN)` = "SPR")
+
+fairness_metric_f = vector()
+fairness_metric_f[1] = sum(abs(log(fobject_f$fairness_check_data$score[fobject_f$fairness_check_data$metric == "AER" & fobject_f$fairness_check_data$model == "tree_roc"])))
+fairness_metric_f[2] = sum(abs(log(fobject_f$fairness_check_data$score[fobject_f$fairness_check_data$metric == "AER" & fobject_f$fairness_check_data$model == "glm_roc"])))
+fairness_metric_f[3] = sum(abs(log(fobject_f$fairness_check_data$score[fobject_f$fairness_check_data$metric == "AER" & fobject_f$fairness_check_data$model == "tree weighted"])))
+fairness_metric_f[4] = sum(abs(log(fobject_f$fairness_check_data$score[fobject_f$fairness_check_data$metric == "AER" & fobject_f$fairness_check_data$model == "glm weighted"])))
+fairness_metric_f[5] = sum(abs(log(fobject_f$fairness_check_data$score[fobject_f$fairness_check_data$metric == "AER" & fobject_f$fairness_check_data$model == "lm"])))
+fairness_metric_f[6] = sum(abs(log(fobject_f$fairness_check_data$score[fobject_f$fairness_check_data$metric == "AER" & fobject_f$fairness_check_data$model == "rpart"])))
+
+paf_f$paf_data$fairness_metric = fairness_metric_f
+
+plot(paf_f)
+
+
+```
+
+
+Above plot is for females.
